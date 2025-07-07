@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Events;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 using UScrollSnap.SharedTypes;
 using UScrollSnap.Tools;
@@ -10,7 +11,7 @@ using UScrollSnap.Tools;
 namespace UScrollSnap
 {
     [RequireComponent(typeof(ScrollRect))]
-    public class ScrollSnap : MonoBehaviour
+    public class ScrollSnap : MonoBehaviour, IPointerDownHandler, IPointerUpHandler
     {
         #region INSPECTOR PROPERTIES
 
@@ -47,6 +48,7 @@ namespace UScrollSnap
         private Coroutine _smoothScrollingCoroutine;
         private Coroutine _snapToNearestCoroutine;
         private bool _smoothScrolling;
+        private bool _isPointerDown;
         private int _selectedItemIndex;
         private float DeltaTime => deltaTimeMode == DeltaTimeMode.Scaled ? Time.deltaTime : Time.unscaledDeltaTime;
         private ScrollRect _scrollRect;
@@ -85,6 +87,16 @@ namespace UScrollSnap
 
         protected virtual void Update() => UpdateAll();
 
+        public void OnPointerDown(PointerEventData eventData)
+        {
+            _isPointerDown = true;
+        }
+
+        public void OnPointerUp(PointerEventData eventData)
+        {
+            _isPointerDown = false;
+        }
+
 #if UNITY_EDITOR
         private void OnValidate()
         {
@@ -105,7 +117,7 @@ namespace UScrollSnap
 
         private void SetupItems()
         {
-            _itemCount = Content.childCount;
+            _itemCount = CountActiveItems();
             _posses = new float[_itemCount];
 
             _distance = _itemCount > 1 ? 1f / (_itemCount - 1f) : 1;
@@ -113,22 +125,44 @@ namespace UScrollSnap
 
             if (layoutDirection == LayoutDirection.Horizontally)
             {
-                for (int i = 0; i < _itemCount; i++)
+                var i = 0;
+                for (int c = 0; c < Content.childCount; c++)
                 {
-                    _items.Add(Content.GetChild(i).GetComponent<RectTransform>());
-                    _posses[i] = _distance * i;
+                    if (AddItem(c, i))
+                        i++;
                 }
             }
             else
             {
-                for (int i = _itemCount - 1; i >= 0; i--)
+                var i = _itemCount - 1;
+                for (int c = Content.childCount - 1; c >= 0; c--)
                 {
-                    _items.Add(Content.GetChild(i).GetComponent<RectTransform>());
-                    _posses[i] = _distance * i;
+                    if (AddItem(c, i))
+                        i--;
                 }
             }
 
             SetupClickHandlers();
+        }
+
+        private int CountActiveItems()
+        {
+            int count = 0;
+            for (int i = 0; i < Content.childCount; i++)
+                if (Content.GetChild(i).gameObject.activeSelf)
+                    count++;
+            return count;
+        }
+
+        private bool AddItem(int childIndex, int itemIndex)
+        {
+            var child = Content.GetChild(childIndex);
+            if (!child.gameObject.activeSelf)
+                return false;
+
+            _items.Add(child.GetComponent<RectTransform>());
+            _posses[itemIndex] = _distance * itemIndex;
+            return true;
         }
 
         private void SetupClickHandlers()
@@ -137,9 +171,13 @@ namespace UScrollSnap
             for (int i = 0; i < _itemCount; i++)
             {
                 var item = _items[i];
-                var clickHandler = item.gameObject.AddComponent<ScrollItemClickHandler>();
-                var index = i;
-                clickHandler.AddClickListener(() => OnAnyItemClicked(index, item));
+                var clickHandler = item.gameObject.GetComponent<ScrollItemClickHandler>();
+                if (clickHandler == null)
+                {
+                    clickHandler = item.gameObject.AddComponent<ScrollItemClickHandler>();
+                    var index = i;
+                    clickHandler.AddClickListener(() => OnAnyItemClicked(index, item));
+                }
                 _itemClickHandlers.Add(clickHandler);
             }
         }
@@ -175,7 +213,7 @@ namespace UScrollSnap
 
             _scrollPos = scrollbar.value;
             UpdateNearest();
-            if (Input.GetMouseButton(0))
+            if (_isPointerDown)
             {
                 ClearSmoothScrolling();
                 _snapping = false;
@@ -189,20 +227,25 @@ namespace UScrollSnap
 
         private void UpdateItemsIfChanged()
         {
-            var childCount = Content.childCount;
+            var childCount = CountActiveItems();
             var childCountChanged = _itemCount != childCount;
             var contentChanged = childCountChanged;
             if (!childCountChanged && HasItem)
             {
-                for (int i = 0; i < _itemCount; i++)
+                var i = 0;
+                for (int c = 0; c < Content.childCount; c++)
                 {
+                    var child = Content.GetChild(c);
+                    if (!child.gameObject.activeSelf)
+                        continue;
+
                     var item = _items[i];
-                    var child = Content.GetChild(i);
                     if (item != child)
                     {
                         contentChanged = true;
                         break;
                     }
+                    i++;
                 }
             }
 
@@ -270,8 +313,8 @@ namespace UScrollSnap
             var selected = _items[_nearestIndex];
             if (_nearestIndex != _selectedItemIndex)
             {
+                UnselectItem(_items[_selectedItemIndex], _selectedItemIndex);
                 SelectItem(selected, _nearestIndex);
-                UnselectItems(_nearestIndex);
             }
         }
 
@@ -296,18 +339,6 @@ namespace UScrollSnap
         {
             var signedDist = (pos - _scrollPos) / (_distance * effect.effectedDistanceBasedOnItemSize);
             return Mathf.Clamp(signedDist, -1, 1);
-        }
-
-        private void UnselectItems(int selectedIntex)
-        {
-            for (int i = 0; i < _itemCount; i++)
-            {
-                if (i != selectedIntex)
-                {
-                    var unselected = _items[i];
-                    UnselectItem(unselected, i);
-                }
-            }
         }
 
         private void SelectItem(RectTransform rt, int index)
@@ -352,7 +383,10 @@ namespace UScrollSnap
         public void ScrollToItem(int itemIndex)
         {
             if (IsIndexInRange(itemIndex))
+            {
                 ScrollTo(_posses[itemIndex]);
+                _selectedItemIndex = itemIndex;
+            }
         }
 
         public void SmoothScrollToItem(int itemIndex, float duration)
